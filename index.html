@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IR Blaster</title>
+<style>
+  :root { --bg:#f5f5f7; --fg:#111; --card:#fff; --accent:#2563eb; --bad:#dc2626; --ok:#16a34a; --mut:#6b7280; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0b0b0d; --fg:#f2f2f2; --card:#1a1a1e; --mut:#9ca3af; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px; padding-top:calc(20px + env(safe-area-inset-top,0px));
+         font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
+         min-height:100vh; display:flex; justify-content:center; }
+  main { width:100%; max-width:460px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--mut); font-size:14px; margin-bottom:18px; }
+  .card { background:var(--card); border-radius:16px; padding:16px; margin-bottom:14px; }
+  button { width:100%; border:0; border-radius:14px; font-size:18px; font-weight:600; padding:16px;
+           color:#fff; background:var(--accent); cursor:pointer; }
+  button:disabled { opacity:.35; cursor:not-allowed; }
+  button.big { background:var(--bad); font-size:22px; padding:34px 16px; }
+  button.sec { background:#6b7280; font-size:15px; padding:12px; margin-top:8px; }
+  .status { display:flex; align-items:center; gap:8px; margin-bottom:12px; font-size:15px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#9ca3af; }
+  .dot.on { background:var(--ok); }
+  input { width:100%; font-size:16px; padding:10px; border-radius:10px; border:1px solid #8884;
+          background:transparent; color:inherit; margin-bottom:8px; }
+  #log { font-family:ui-monospace,monospace; font-size:12px; color:var(--mut); white-space:pre-wrap;
+         max-height:140px; overflow:auto; }
+  .warn { font-size:13px; color:var(--mut); }
+</style>
+</head>
+<body>
+<main>
+  <h1>IR Blaster</h1>
+  <div class="sub">Bluetooth remote for your ESP32-DIV</div>
+
+  <div class="card">
+    <div class="status"><span class="dot" id="dot"></span><span id="state">Not connected</span></div>
+    <button id="connect">Connect to IR-Blaster</button>
+    <button id="disconnect" class="sec" disabled>Disconnect</button>
+  </div>
+
+  <div class="card">
+    <button id="all" class="big" disabled>Turn off all TVs</button>
+    <button id="stop" class="sec" disabled>Stop</button>
+    <div id="progress" class="warn" style="margin-top:10px;text-align:center"></div>
+    <button id="eu" class="sec" disabled>Europe / other codes only</button>
+    <button id="na" class="sec" disabled>North America / Asia codes only</button>
+    <p class="warn">The full sweep takes about 1&ndash;2 minutes. It's a power toggle, so a TV that is already off may switch on.</p>
+  </div>
+
+  <div class="card">
+    <input id="cmd" placeholder="Custom: NEC,20DF10EF,32  or  0">
+    <button id="send" class="sec" disabled>Send custom command</button>
+  </div>
+
+  <div class="card"><div id="log">Log appears here.</div></div>
+  <p class="warn" id="support"></p>
+</main>
+
+<script>
+const SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CMD     = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const STATUS  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+let device = null, cmdChar = null;
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder(), dec = new TextDecoder();
+
+function log(m){ const l=$("log"); l.textContent = m + "\n" + (l.textContent==="Log appears here."?"":l.textContent); }
+function setConnected(on){
+  $("dot").classList.toggle("on", on);
+  $("state").textContent = on ? "Connected to " + (device && device.name || "IR-Blaster") : "Not connected";
+  ["all","stop","eu","na","send","disconnect"].forEach(i => $(i).disabled = !on);
+  $("connect").disabled = on;
+}
+
+async function connect(){
+  try {
+    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
+    device.addEventListener("gattserverdisconnected", () => { setConnected(false); log("Disconnected"); });
+    $("state").textContent = "Connecting...";
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE);
+    cmdChar = await svc.getCharacteristic(CMD);
+    const st = await svc.getCharacteristic(STATUS);
+    await st.startNotifications();
+    st.addEventListener("characteristicvaluechanged", e => {
+      const m = dec.decode(e.target.value);
+      if (/^\d+\/\d+$/.test(m)) { $("progress").textContent = "Sending... " + m; return; }
+      if (m === "DONE" || m === "STOPPED") $("progress").textContent = m === "DONE" ? "Finished" : "Stopped";
+      log("Board: " + m);
+    });
+    setConnected(true);
+    log("Connected");
+  } catch (e) {
+    setConnected(false);
+    log("Error: " + e.message);
+  }
+}
+
+async function sendCmd(text){
+  try {
+    await cmdChar.writeValue(enc.encode(text));
+    log("Sent: " + text);
+  } catch (e) { log("Send failed: " + e.message); }
+}
+
+$("connect").onclick = connect;
+$("disconnect").onclick = () => device && device.gatt.connected && device.gatt.disconnect();
+$("all").onclick = () => { $("progress").textContent = "Starting..."; sendCmd("ALL"); };
+$("eu").onclick = () => { $("progress").textContent = "Starting..."; sendCmd("EU"); };
+$("na").onclick = () => { $("progress").textContent = "Starting..."; sendCmd("NA"); };
+$("stop").onclick = () => sendCmd("STOP");
+$("send").onclick = () => { const v = $("cmd").value.trim(); if (v) sendCmd(v); };
+
+if (!navigator.bluetooth) {
+  $("connect").disabled = true;
+  $("support").textContent = "This browser doesn't support Web Bluetooth. On iPhone use the free Bluefy browser; on Android or a PC use Chrome.";
+} else {
+  $("support").textContent = "Needs a browser with Web Bluetooth (Chrome, or Bluefy on iPhone) and an https page.";
+}
+</script>
+</body>
+</html>
